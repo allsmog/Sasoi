@@ -1,0 +1,29 @@
+name = "agentic-hop"
+main = "src/index.ts"
+compatibility_date = "2025-03-14"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+# Investigator: every 30 minutes
+# Strategist: every 6 hours
+crons = ["*/30 * * * *", "0 */6 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agentic-hop-db"
+database_id = "" # Set after running `npm run d1:create`
+migrations_dir = "src/db/migrations"
+
+[vars]
+HOP_ORCHESTRATOR_URL = "http://localhost:3001"
+HOP_INGESTOR_URL = "http://localhost:3002"
+HOP_BLUEPRINT_URL = "http://localhost:3003"
+HOP_ENRICHMENT_URL = "http://localhost:3004"
+HOP_ML_URL = "http://localhost:8000"
+DEFAULT_AUTONOMY_LEVEL = "0"
+PROPOSAL_EXPIRY_HOURS = "24"
+
+# Secrets (set via `wrangler secret put`):
+# ANTHROPIC_API_KEY
+# INTERNAL_API_SECRET
+# API_KEY

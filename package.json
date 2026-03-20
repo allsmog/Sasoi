@@ -1,0 +1,30 @@
+{
+  "name": "agentic-hop",
+  "version": "0.1.0",
+  "description": "Autonomous AI agents for the Honeypot Orchestration Platform — runs on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "d1:create": "wrangler d1 create agentic-hop-db",
+    "d1:migrate": "wrangler d1 migrations apply agentic-hop-db",
+    "d1:migrate:local": "wrangler d1 migrations apply agentic-hop-db --local",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.55.1",
+    "@mariozechner/pi-ai": "^0.55.1",
+    "@sinclair/typebox": "^0.34.41",
+    "hono": "^4.7.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20250313.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  }
+}
