@@ -3,7 +3,11 @@ dist/
 .wrangler/
 .dev.vars
 .env
+.env.*
+!.env.example
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 coverage/
 .DS_Store
 .claude/
