@@ -2,6 +2,16 @@
   "name": "agentic-hop",
   "version": "0.1.0",
   "description": "Autonomous AI agents for the Honeypot Orchestration Platform — runs on Cloudflare Workers",
+  "author": "Shayaun Nejad",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/allsmog/Sasoi.git"
+  },
+  "homepage": "https://github.com/allsmog/Sasoi",
+  "bugs": {
+    "url": "https://github.com/allsmog/Sasoi/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
@@ -9,6 +19,7 @@
     "d1:create": "wrangler d1 create agentic-hop-db",
     "d1:migrate": "wrangler d1 migrations apply agentic-hop-db",
     "d1:migrate:local": "wrangler d1 migrations apply agentic-hop-db --local",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "cf-typegen": "wrangler types"

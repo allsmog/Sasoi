@@ -1,10 +1,23 @@
 # Sasoi (誘い) — Autonomous AI Agents for Honeypot Orchestration
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > *Sasoi* (誘い) — a judo term meaning "invitation" or "lure." In judo, sasoi draws the opponent into a committed attack that exposes them. In cybersecurity, Sasoi draws attackers into honeypots that expose their techniques.
 
 Sasoi is an autonomous AI agent system that orchestrates sophisticated deception operations — honeypots, honeytokens, cloud decoys — at scale. Four specialized Claude-powered agents form a threat intelligence pipeline that enriches events, correlates attack campaigns, deploys intelligent traps, and adapts deception in real time.
 
 Built on Cloudflare Workers with D1 and Claude as the agent backbone.
+
+## Why Sasoi
+
+Traditional honeypots are static — deploy once, hope someone pokes them, manually review logs. This breaks down at scale:
+
+- **No adaptation** — attackers fingerprint honeypots and move on
+- **No correlation** — isolated honeypots can't detect coordinated campaigns
+- **No intelligence** — raw logs without context waste analyst time
+- **No cost control** — enriching every event equally burns budget on noise
+
+Sasoi fixes this with four AI agents that specialize: a cheap fast model (Haiku) triages events in real time, a capable model (Sonnet) investigates and correlates campaigns, a strategist deploys environment-aware traps that blend with production, and a responder adapts deception when campaigns are detected. The result is a self-improving deception network that gets smarter as attackers interact with it.
 
 ---
 
@@ -149,7 +162,9 @@ npm run d1:migrate:local
 # Set secrets
 wrangler secret put ANTHROPIC_API_KEY
 wrangler secret put INTERNAL_API_SECRET
-wrangler secret put API_KEY
+
+# Provision a tenant API key out-of-band
+# Store only the SHA-256 hash in tenant_api_keys (see below)
 
 # Development
 npm run dev
@@ -164,7 +179,29 @@ npm run deploy
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Claude API key for agent inference |
 | `INTERNAL_API_SECRET` | HMAC signing key for internal webhooks |
-| `API_KEY` | Bearer token for HTTP API authentication |
+
+### Tenant API Key Provisioning
+
+HTTP API access is tenant-scoped. Each tenant needs one active bearer key recorded in the
+`tenant_api_keys` table. The worker stores and looks up only the SHA-256 hash.
+
+Generate a random key and its hash locally:
+
+```bash
+TENANT_API_KEY="$(openssl rand -hex 32)"
+TENANT_API_KEY_HASH="$(printf '%s' "$TENANT_API_KEY" | shasum -a 256 | awk '{print $1}')"
+TENANT_API_KEY_PREFIX="${TENANT_API_KEY:0:12}"
+printf 'Tenant key: %s\nHash: %s\nPrefix: %s\n' "$TENANT_API_KEY" "$TENANT_API_KEY_HASH" "$TENANT_API_KEY_PREFIX"
+```
+
+Insert the hash out-of-band:
+
+```sql
+INSERT INTO tenant_api_keys (tenant_id, key_hash, key_prefix, status)
+VALUES ('tenant-123', '<sha256-hash>', '<prefix>', 'active');
+```
+
+Send the raw key as `Authorization: Bearer <tenant-key>`.
 
 ---
 
@@ -191,7 +228,7 @@ Tests cover all layers of the system:
 
 ### HTTP Endpoints
 
-All HTTP endpoints require `Authorization: Bearer <API_KEY>`.
+All HTTP endpoints require `Authorization: Bearer <tenant-key>`.
 
 #### Agent Triggers
 
@@ -275,6 +312,15 @@ Three rounds of deep security audits completed:
 
 ---
 
+## Contributing
+
+Contributions welcome. Please open an issue first to discuss what you'd like to change.
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/my-change`)
+3. Run tests (`npm test`)
+4. Open a PR
+
 ## License
 
-Proprietary. All rights reserved.
+[MIT](LICENSE)
