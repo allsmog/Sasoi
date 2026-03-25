@@ -13,11 +13,21 @@ export interface Env {
   // Secrets (set via `wrangler secret put`)
   ANTHROPIC_API_KEY: string
   INTERNAL_API_SECRET: string
-  API_KEY: string
 
   // Config vars
   DEFAULT_AUTONOMY_LEVEL: string
   PROPOSAL_EXPIRY_HOURS: string
+}
+
+export interface AppVariables {
+  authenticatedTenantId: string
+  tenantId: string
+  rawBody: string
+}
+
+export interface AppEnv {
+  Bindings: Env
+  Variables: AppVariables
 }
 
 export const logger = {

@@ -14,6 +14,9 @@ vi.mock('../../src/clients/db.js', () => ({
   computeTenantMetrics: vi.fn().mockResolvedValue({}),
   insertCloudConnector: vi.fn().mockResolvedValue('conn-1'),
   queryCloudConnectors: vi.fn().mockResolvedValue({ results: [] }),
+  getCloudConnector: vi.fn().mockResolvedValue({ connector_id: 'conn-1', tenant_id: 'tenant-1', provider: 'aws', status: 'active' }),
+  getClusterById: vi.fn().mockResolvedValue({ cluster_id: 'cluster-1', tenant_id: 'tenant-1', status: 'ready' }),
+  getDeploymentById: vi.fn().mockResolvedValue({ deployment_id: 'dep-1', tenant_id: 'tenant-1', status: 'healthy' }),
 }))
 vi.mock('../../src/agents/enricher.js', () => ({ runEnricher: vi.fn() }))
 vi.mock('../../src/agents/investigator.js', () => ({ runInvestigator: vi.fn() }))
@@ -25,7 +28,12 @@ vi.mock('../../src/config.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }))
 vi.mock('../../src/middleware/api-auth.js', () => ({
-  apiAuth: vi.fn(async (_c: unknown, next: () => Promise<void>) => await next()),
+  apiAuth: vi.fn(async (c: { req: { header: (name: string) => string | undefined }; set: (key: string, value: string) => void }, next: () => Promise<void>) => {
+    const tenantId = c.req.header('X-Test-Tenant') ?? 'tenant-1'
+    c.set('authenticatedTenantId', tenantId)
+    c.set('tenantId', tenantId)
+    await next()
+  }),
 }))
 
 const mockRun = vi.fn().mockResolvedValue(undefined)
@@ -47,7 +55,6 @@ const mockEnv = {
   HOP_ML_URL: 'http://localhost:8000',
   DEFAULT_AUTONOMY_LEVEL: '0',
   PROPOSAL_EXPIRY_HOURS: '24',
-  API_KEY: 'test-api-key',
 }
 
 describe('PUT /config/:tenantId', () => {
@@ -161,7 +168,26 @@ describe('POST /proposals/:proposalId/approve — cross-tenant auth', () => {
     app.route('/', httpRoutes)
   })
 
-  it('returns 400 when tenant_id missing from body', async () => {
+  it('uses the authenticated tenant when tenant_id is omitted', async () => {
+    const futureDate = new Date(Date.now() + 86400_000).toISOString()
+    const mockFirst = vi.fn().mockResolvedValue({
+      proposal_id: 'prop-1',
+      tenant_id: 'tenant-1',
+      status: 'pending',
+      expires_at: futureDate,
+      action_type: 'execute_deployment',
+      action_payload: JSON.stringify({ blueprint_id: 'bp-1', config: {} }),
+    })
+    const mockRun = vi.fn().mockResolvedValue({ meta: { changes: 1 } })
+    const mockDB = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockReturnValue({
+          first: mockFirst,
+          run: mockRun,
+        }),
+      }),
+    }
+
     const res = await app.request(
       '/proposals/prop-1/approve',
       {
@@ -169,12 +195,12 @@ describe('POST /proposals/:proposalId/approve — cross-tenant auth', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reviewed_by: 'admin' }),
       },
-      mockEnv,
+      { ...mockEnv, DB: mockDB as unknown as D1Database },
     )
 
-    expect(res.status).toBe(400)
+    expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.error).toContain('tenant_id')
+    expect(body.status).toBe('executed')
   })
 
   it('returns 403 when tenant_id mismatches proposal', async () => {
@@ -200,7 +226,7 @@ describe('POST /proposals/:proposalId/approve — cross-tenant auth', () => {
       '/proposals/prop-1/approve',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Test-Tenant': 'tenant-attacker' },
         body: JSON.stringify({ reviewed_by: 'admin', tenant_id: 'tenant-attacker' }),
       },
       { ...mockEnv, DB: mockDB as unknown as D1Database },
@@ -231,7 +257,7 @@ describe('GET /sessions — NaN limit fallback', () => {
 
     const res = await app.request(
       '/sessions?tenant_id=t1&limit=abc',
-      { method: 'GET' },
+      { method: 'GET', headers: { 'X-Test-Tenant': 't1' } },
       { ...mockEnv, DB: mockDB as unknown as D1Database },
     )
 
@@ -256,9 +282,8 @@ describe('POST /cloud-connectors — 201 status', () => {
       '/cloud-connectors',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Test-Tenant': 'tenant-1' },
         body: JSON.stringify({
-          tenant_id: 'tenant-1',
           provider: 'aws',
           account_ref: '123456789012',
         }),

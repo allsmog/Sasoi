@@ -48,7 +48,7 @@ describe('createTriggerNotificationTool', () => {
     })
 
     expect(fetch).toHaveBeenCalledTimes(2)
-    expect(result.details).toEqual({ sent: ['slack', 'webhook'] })
+    expect(result.details).toEqual({ sent: ['slack', 'webhook'], skipped: [], failed: [] })
   })
 
   it('filters destinations by channel type', async () => {
@@ -66,7 +66,7 @@ describe('createTriggerNotificationTool', () => {
     })
 
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(result.details).toEqual({ sent: ['slack'] })
+    expect(result.details).toEqual({ sent: ['slack'], skipped: [], failed: [] })
   })
 
   it('uses SIEM format when destination has format_type', async () => {
@@ -92,6 +92,54 @@ describe('createTriggerNotificationTool', () => {
         severity: 'high',
       }),
     )
+  })
+
+  it('skips destinations with unsafe URLs', async () => {
+    const { queryDestinations } = await import('../../src/clients/db.js')
+    vi.mocked(queryDestinations).mockResolvedValueOnce({
+      results: [{ type: 'webhook', config_ref: 'http://localhost/test', format_type: null }],
+    } as never)
+
+    const { createTriggerNotificationTool } = await import('../../src/tools/notification.js')
+    const tool = createTriggerNotificationTool(mockEnv)
+    const result = await tool.execute('call-unsafe', {
+      tenant_id: 'tenant-1',
+      severity: 'warning',
+      title: 'Unsafe Destination',
+      message: 'Should not send',
+      channel: 'all',
+    })
+
+    expect(fetch).not.toHaveBeenCalled()
+    expect(result.details).toEqual({
+      sent: [],
+      skipped: [{ type: 'webhook', reason: 'unsafe_url' }],
+      failed: [],
+    })
+  })
+
+  it('marks non-2xx responses as failed', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }))
+    const { queryDestinations } = await import('../../src/clients/db.js')
+    vi.mocked(queryDestinations).mockResolvedValueOnce({
+      results: [{ type: 'webhook', config_ref: 'https://webhook.test', format_type: null }],
+    } as never)
+
+    const { createTriggerNotificationTool } = await import('../../src/tools/notification.js')
+    const tool = createTriggerNotificationTool(mockEnv)
+    const result = await tool.execute('call-failed', {
+      tenant_id: 'tenant-1',
+      severity: 'critical',
+      title: 'Delivery Failure',
+      message: 'Webhook returned 503',
+      channel: 'all',
+    })
+
+    expect(result.details).toEqual({
+      sent: [],
+      skipped: [],
+      failed: [{ type: 'webhook', reason: 'http_503' }],
+    })
   })
 })
 

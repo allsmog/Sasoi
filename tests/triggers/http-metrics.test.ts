@@ -28,6 +28,9 @@ vi.mock('../../src/clients/db.js', () => ({
   }),
   insertCloudConnector: vi.fn().mockResolvedValue('conn-1'),
   queryCloudConnectors: vi.fn().mockResolvedValue({ results: [] }),
+  getCloudConnector: vi.fn().mockResolvedValue({ connector_id: 'conn-1', tenant_id: 'tenant-1', provider: 'aws', status: 'active' }),
+  getClusterById: vi.fn().mockResolvedValue({ cluster_id: 'cluster-1', tenant_id: 'tenant-1', status: 'ready' }),
+  getDeploymentById: vi.fn().mockResolvedValue({ deployment_id: 'dep-1', tenant_id: 'tenant-1', status: 'healthy' }),
 }))
 
 vi.mock('../../src/agents/enricher.js', () => ({ runEnricher: vi.fn() }))
@@ -40,7 +43,12 @@ vi.mock('../../src/config.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }))
 vi.mock('../../src/middleware/api-auth.js', () => ({
-  apiAuth: vi.fn(async (_c: unknown, next: () => Promise<void>) => await next()),
+  apiAuth: vi.fn(async (c: { req: { header: (name: string) => string | undefined }; set: (key: string, value: string) => void }, next: () => Promise<void>) => {
+    const tenantId = c.req.header('X-Test-Tenant') ?? 'tenant-1'
+    c.set('authenticatedTenantId', tenantId)
+    c.set('tenantId', tenantId)
+    await next()
+  }),
 }))
 
 const mockEnv = {
@@ -54,7 +62,6 @@ const mockEnv = {
   HOP_ML_URL: 'http://localhost:8000',
   DEFAULT_AUTONOMY_LEVEL: '0',
   PROPOSAL_EXPIRY_HOURS: '24',
-  API_KEY: 'test-api-key',
 }
 
 describe('GET /metrics/:tenantId', () => {
@@ -78,7 +85,11 @@ describe('GET /metrics/:tenantId', () => {
   })
 
   it('returns zeroed metrics for empty tenant', async () => {
-    const res = await app.request('/metrics/empty-tenant', { method: 'GET' }, mockEnv)
+    const res = await app.request(
+      '/metrics/empty-tenant',
+      { method: 'GET', headers: { 'X-Test-Tenant': 'empty-tenant' } },
+      mockEnv,
+    )
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.total_deployments).toBe(0)
@@ -92,7 +103,7 @@ describe('GET /metrics/:tenantId', () => {
 
     await app.request(
       '/metrics/tenant-1?since=2026-03-01&until=2026-03-20',
-      { method: 'GET' },
+      { method: 'GET', headers: { 'X-Test-Tenant': 'tenant-1' } },
       mockEnv,
     )
 
@@ -142,7 +153,7 @@ describe('POST /proposals/:proposalId/approve', () => {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewed_by: 'admin', tenant_id: 'tenant-1' }),
+        body: JSON.stringify({ reviewed_by: 'admin' }),
       },
       { ...mockEnv, DB: mockDB as unknown as D1Database },
     )
@@ -160,7 +171,7 @@ describe('POST /proposals/:proposalId/approve', () => {
       tenant_id: 'tenant-1',
       status: 'pending',
       expires_at: pastDate,
-      action_type: 'deploy_honeypot',
+      action_type: 'execute_deployment',
       action_payload: '{}',
     })
 
@@ -178,7 +189,7 @@ describe('POST /proposals/:proposalId/approve', () => {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewed_by: 'admin', tenant_id: 'tenant-1' }),
+        body: JSON.stringify({ reviewed_by: 'admin' }),
       },
       { ...mockEnv, DB: mockDB as unknown as D1Database },
     )
@@ -197,7 +208,7 @@ describe('POST /proposals/:proposalId/approve', () => {
       tenant_id: 'tenant-1',
       status: 'pending',
       expires_at: futureDate,
-      action_type: 'deploy_honeypot',
+      action_type: 'execute_deployment',
       action_payload: JSON.stringify({ blueprint_id: 'bp-1', config: {} }),
     })
 
@@ -215,16 +226,89 @@ describe('POST /proposals/:proposalId/approve', () => {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewed_by: 'admin', note: 'Looks good', tenant_id: 'tenant-1' }),
+        body: JSON.stringify({ reviewed_by: 'admin', note: 'Looks good' }),
       },
       { ...mockEnv, DB: mockDB as unknown as D1Database },
     )
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.status).toBe('approved')
+    expect(body.status).toBe('executed')
     expect(body.proposal_id).toBe('prop-1')
     expect(createDeployment).toHaveBeenCalled()
+  })
+
+  it('returns 422 for invalid proposal payload without claiming the proposal', async () => {
+    const mockRun = vi.fn().mockResolvedValue({ meta: { changes: 1 } })
+    const mockFirst = vi.fn().mockResolvedValue({
+      proposal_id: 'prop-invalid',
+      tenant_id: 'tenant-1',
+      status: 'pending',
+      expires_at: new Date(Date.now() + 86400_000).toISOString(),
+      action_type: 'execute_deployment',
+      action_payload: JSON.stringify({ config: {} }),
+    })
+    const mockDB = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockReturnValue({
+          first: mockFirst,
+          run: mockRun,
+        }),
+      }),
+    }
+
+    const res = await app.request(
+      '/proposals/prop-invalid/approve',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewed_by: 'admin' }),
+      },
+      { ...mockEnv, DB: mockDB as unknown as D1Database },
+    )
+
+    expect(res.status).toBe(422)
+    const body = await res.json()
+    expect(body.error).toContain('failed validation')
+    expect(mockRun).not.toHaveBeenCalled()
+  })
+
+  it('marks proposal as execution_failed when downstream execution fails', async () => {
+    const { createDeployment } = await import('../../src/clients/orchestrator.js')
+    vi.mocked(createDeployment).mockRejectedValueOnce(new Error('orchestrator unavailable'))
+
+    const mockRun = vi.fn().mockResolvedValue({ meta: { changes: 1 } })
+    const mockFirst = vi.fn().mockResolvedValue({
+      proposal_id: 'prop-fail',
+      tenant_id: 'tenant-1',
+      status: 'pending',
+      expires_at: new Date(Date.now() + 86400_000).toISOString(),
+      action_type: 'execute_deployment',
+      action_payload: JSON.stringify({ blueprint_id: 'bp-1', config: {} }),
+    })
+    const mockDB = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockReturnValue({
+          first: mockFirst,
+          run: mockRun,
+        }),
+      }),
+    }
+
+    const res = await app.request(
+      '/proposals/prop-fail/approve',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewed_by: 'admin' }),
+      },
+      { ...mockEnv, DB: mockDB as unknown as D1Database },
+    )
+
+    expect(res.status).toBe(502)
+    const body = await res.json()
+    expect(body.status).toBe('execution_failed')
+    expect(body.error).toContain('orchestrator unavailable')
   })
 })
 
@@ -253,7 +337,7 @@ describe('POST /proposals/:proposalId/reject', () => {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewed_by: 'admin', note: 'Not needed', tenant_id: 'tenant-1' }),
+        body: JSON.stringify({ reviewed_by: 'admin', note: 'Not needed' }),
       },
       { ...mockEnv, DB: mockDB as unknown as D1Database },
     )

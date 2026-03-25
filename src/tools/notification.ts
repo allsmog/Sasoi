@@ -35,57 +35,75 @@ export function createTriggerNotificationTool(env: Env): AgentTool<typeof Trigge
           : (destinations ?? []).filter((d: Record<string, unknown>) => d.type === params.channel)
 
       const sent: string[] = []
+      const skipped: Array<{ type: string; reason: string }> = []
+      const failed: Array<{ type: string; reason: string }> = []
       for (const dest of targetDests) {
         const destRecord = dest as { type: string; config_ref: string; format_type?: string }
         try {
-          if (destRecord.config_ref && isSafeUrl(destRecord.config_ref)) {
-            let body: string
-            const contentType = 'application/json'
-
-            if (destRecord.format_type) {
-              // SIEM-formatted output
-              body = formatForDestination(destRecord.format_type, {
-                signal: params.title,
-                title: params.title,
-                severity: params.severity,
-                message: params.message,
-                tenant_id: params.tenant_id,
-                timestamp: new Date().toISOString(),
-                metadata: params.metadata as Record<string, unknown>,
-              })
-            } else {
-              // Default JSON format
-              body = JSON.stringify({
-                severity: params.severity,
-                title: params.title,
-                message: params.message,
-                metadata: params.metadata,
-                timestamp: new Date().toISOString(),
-              })
-            }
-
-            const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), 10_000)
-            try {
-              await fetch(destRecord.config_ref, {
-                method: 'POST',
-                headers: { 'Content-Type': contentType },
-                body,
-                signal: controller.signal,
-              })
-            } finally {
-              clearTimeout(timeout)
-            }
+          if (!destRecord.config_ref) {
+            skipped.push({ type: destRecord.type, reason: 'missing_config_ref' })
+            continue
           }
-          sent.push(destRecord.type)
+          if (!isSafeUrl(destRecord.config_ref)) {
+            skipped.push({ type: destRecord.type, reason: 'unsafe_url' })
+            continue
+          }
+
+          let body: string
+          const contentType = 'application/json'
+
+          if (destRecord.format_type) {
+            body = formatForDestination(destRecord.format_type, {
+              signal: params.title,
+              title: params.title,
+              severity: params.severity,
+              message: params.message,
+              tenant_id: params.tenant_id,
+              timestamp: new Date().toISOString(),
+              metadata: params.metadata as Record<string, unknown>,
+            })
+          } else {
+            body = JSON.stringify({
+              severity: params.severity,
+              title: params.title,
+              message: params.message,
+              metadata: params.metadata,
+              timestamp: new Date().toISOString(),
+            })
+          }
+
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 10_000)
+          try {
+            const response = await fetch(destRecord.config_ref, {
+              method: 'POST',
+              headers: { 'Content-Type': contentType },
+              body,
+              signal: controller.signal,
+            })
+            if (!response.ok) {
+              failed.push({ type: destRecord.type, reason: `http_${response.status}` })
+              continue
+            }
+            sent.push(destRecord.type)
+          } finally {
+            clearTimeout(timeout)
+          }
         } catch (err) {
           logger.error({ err, destination: destRecord.type }, 'Failed to send notification')
+          failed.push({
+            type: destRecord.type,
+            reason: err instanceof Error ? err.message : String(err),
+          })
         }
       }
 
       return {
-        content: [{ type: 'text' as const, text: `Notification sent to ${sent.length} destination(s): ${sent.join(', ') || 'none configured'}` }],
-        details: { sent },
+        content: [{
+          type: 'text' as const,
+          text: `Notification results: ${sent.length} sent, ${skipped.length} skipped, ${failed.length} failed.`,
+        }],
+        details: { sent, skipped, failed },
       }
     },
   }

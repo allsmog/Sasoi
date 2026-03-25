@@ -5,9 +5,10 @@ import { logger } from '../config.js'
 import { createQueryEventsTool } from '../tools/events.js'
 import { createQueryFleetTool } from '../tools/fleet.js'
 import { createRotatePersonaTool, createGenerateVariationTool } from '../tools/persona.js'
-import { createDeployCanaryTool } from '../tools/deployment.js'
+import { createDeployCanaryTool, prepareCanaryDeploymentPayload } from '../tools/deployment.js'
 import { createIncreaseLoggingDepthTool, createTriggerNotificationTool } from '../tools/notification.js'
 import { createBlockIPTool, createRedirectAttackerTool } from '../tools/response.js'
+import { withMutationGuard } from '../tools/mutation.js'
 import { SafetyGuard } from '../safety/guard.js'
 import { sanitizeForPrompt } from '../safety/sanitize.js'
 import { createAgentSession, completeAgentSession, getTenantAgentConfig } from '../clients/db.js'
@@ -73,19 +74,39 @@ export async function runResponder(
   })
 
   const guard = new SafetyGuard({ sessionId, agentType: 'responder', tenantId: params.tenantId, env })
+  const mutationCtx = { env, tenantId: params.tenantId, sessionId, agentType: 'responder' }
 
   const tools = tenantConfig.responder_opt_in
     ? [
         createQueryEventsTool(env),
         createQueryFleetTool(env),
-        createRotatePersonaTool(env),
-        createGenerateVariationTool(env),
-        createDeployCanaryTool(env),
-        createIncreaseLoggingDepthTool(env),
+        withMutationGuard(createRotatePersonaTool(env), mutationCtx, {
+          buildReasoning: (toolParams) => `Rotate persona for deployment ${toolParams.deployment_id}`,
+        }),
+        withMutationGuard(createGenerateVariationTool(env), mutationCtx, {
+          buildReasoning: (toolParams) => `Generate persona variation for ${toolParams.persona_id}`,
+        }),
+        withMutationGuard(createDeployCanaryTool(env), mutationCtx, {
+          buildProposalPayload: async (toolParams, signal) => {
+            void signal
+            return await prepareCanaryDeploymentPayload(env, {
+              service_type: toolParams.service_type,
+              target_ips: toolParams.target_ips,
+            }) as unknown as Record<string, unknown>
+          },
+          buildReasoning: (toolParams) => toolParams.reasoning,
+        }),
+        withMutationGuard(createIncreaseLoggingDepthTool(env), mutationCtx, {
+          buildReasoning: (toolParams) => toolParams.reason,
+        }),
         createTriggerNotificationTool(env),
         ...(tenantConfig.autonomy_level >= 2 ? [
-          createBlockIPTool(env),
-          createRedirectAttackerTool(env),
+          withMutationGuard(createBlockIPTool(env), mutationCtx, {
+            buildReasoning: (toolParams) => toolParams.reason,
+          }),
+          withMutationGuard(createRedirectAttackerTool(env), mutationCtx, {
+            buildReasoning: (toolParams) => toolParams.reason,
+          }),
         ] : []),
       ]
     : [createTriggerNotificationTool(env)]

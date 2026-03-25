@@ -2,18 +2,47 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Hono } from 'hono'
 import { apiAuth } from '../../src/middleware/api-auth.js'
 
-const mockEnv = {
-  DB: {} as D1Database,
-  ANTHROPIC_API_KEY: 'test',
-  INTERNAL_API_SECRET: 'test-secret',
-  API_KEY: 'test-api-key',
-  HOP_ORCHESTRATOR_URL: 'http://localhost:3001',
-  HOP_INGESTOR_URL: 'http://localhost:3002',
-  HOP_BLUEPRINT_URL: 'http://localhost:3003',
-  HOP_ENRICHMENT_URL: 'http://localhost:3004',
-  HOP_ML_URL: 'http://localhost:8000',
-  DEFAULT_AUTONOMY_LEVEL: '0',
-  PROPOSAL_EXPIRY_HOURS: '24',
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function createMockEnv(foundRecord?: { tenant_id: string; key_hash: string }) {
+  const selectFirst = vi.fn().mockResolvedValue(foundRecord ?? null)
+  const updateRun = vi.fn().mockResolvedValue(undefined)
+
+  const prepare = vi.fn((sql: string) => {
+    if (sql.includes('SELECT * FROM tenant_api_keys')) {
+      return {
+        bind: vi.fn().mockReturnValue({
+          first: selectFirst,
+        }),
+      }
+    }
+
+    if (sql.includes('UPDATE tenant_api_keys SET last_used_at')) {
+      return {
+        bind: vi.fn().mockReturnValue({
+          run: updateRun,
+        }),
+      }
+    }
+
+    throw new Error(`Unexpected SQL in apiAuth test: ${sql}`)
+  })
+
+  return {
+    DB: { prepare } as unknown as D1Database,
+    ANTHROPIC_API_KEY: 'test',
+    INTERNAL_API_SECRET: 'test-secret',
+    HOP_ORCHESTRATOR_URL: 'http://localhost:3001',
+    HOP_INGESTOR_URL: 'http://localhost:3002',
+    HOP_BLUEPRINT_URL: 'http://localhost:3003',
+    HOP_ENRICHMENT_URL: 'http://localhost:3004',
+    HOP_ML_URL: 'http://localhost:8000',
+    DEFAULT_AUTONOMY_LEVEL: '0',
+    PROPOSAL_EXPIRY_HOURS: '24',
+  }
 }
 
 describe('apiAuth middleware', () => {
@@ -24,100 +53,62 @@ describe('apiAuth middleware', () => {
 
     app = new Hono()
     app.use('*', apiAuth)
-    app.get('/test', (c) => c.json({ ok: true }))
+    app.get('/test', (c) => c.json({ ok: true, tenant_id: c.get('authenticatedTenantId') }))
   })
 
   it('returns 401 when Authorization header is missing', async () => {
-    const res = await app.request('/test', {
-      method: 'GET',
-    }, mockEnv)
+    const res = await app.request('/test', { method: 'GET' }, createMockEnv())
 
     expect(res.status).toBe(401)
-    const json = await res.json()
-    expect(json).toEqual({ error: 'Missing Authorization header' })
+    expect(await res.json()).toEqual({ error: 'Missing Authorization header' })
   })
 
   it('returns 401 when format is not "Bearer <token>"', async () => {
-    const res = await app.request('/test', {
-      method: 'GET',
-      headers: {
-        Authorization: 'Basic some-token',
+    const res = await app.request(
+      '/test',
+      {
+        method: 'GET',
+        headers: { Authorization: 'Basic some-token' },
       },
-    }, mockEnv)
+      createMockEnv(),
+    )
 
     expect(res.status).toBe(401)
-    const json = await res.json()
-    expect(json).toEqual({ error: 'Invalid Authorization format. Expected: Bearer <API_KEY>' })
+    expect(await res.json()).toEqual({ error: 'Invalid Authorization format. Expected: Bearer <API_KEY>' })
   })
 
-  it('returns 401 when Authorization header has too many parts', async () => {
-    const res = await app.request('/test', {
-      method: 'GET',
-      headers: {
-        Authorization: 'Bearer token extra',
+  it('returns 401 when API key does not match an active tenant key', async () => {
+    const res = await app.request(
+      '/test',
+      {
+        method: 'GET',
+        headers: { Authorization: 'Bearer wrong-api-key' },
       },
-    }, mockEnv)
+      createMockEnv(),
+    )
 
     expect(res.status).toBe(401)
-    const json = await res.json()
-    expect(json).toEqual({ error: 'Invalid Authorization format. Expected: Bearer <API_KEY>' })
+    expect(await res.json()).toEqual({ error: 'Invalid API key' })
   })
 
-  it('returns 401 when API key does not match', async () => {
-    const res = await app.request('/test', {
-      method: 'GET',
-      headers: {
-        Authorization: 'Bearer wrong-api-key',
+  it('stores authenticated tenant id in context and updates last_used_at', async () => {
+    const token = 'tenant-secret-key'
+    const tokenHash = await sha256Hex(token)
+    const env = createMockEnv({ tenant_id: 'tenant-123', key_hash: tokenHash })
+
+    const res = await app.request(
+      '/test',
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       },
-    }, mockEnv)
-
-    expect(res.status).toBe(401)
-    const json = await res.json()
-    expect(json).toEqual({ error: 'Invalid API key' })
-  })
-
-  it('returns 500 when API_KEY is not configured', async () => {
-    const res = await app.request('/test', {
-      method: 'GET',
-      headers: { Authorization: 'Bearer some-key' },
-    }, { ...mockEnv, API_KEY: '' })
-
-    expect(res.status).toBe(500)
-    const json = await res.json()
-    expect(json.error).toContain('API_KEY not set')
-  })
-
-  it('stores X-Tenant-ID header in context', async () => {
-    let capturedTenantId: string | undefined
-
-    const tenantApp = new Hono()
-    tenantApp.use('*', apiAuth)
-    tenantApp.get('/test', (c) => {
-      capturedTenantId = c.get('tenantId')
-      return c.json({ ok: true })
-    })
-
-    await tenantApp.request('/test', {
-      method: 'GET',
-      headers: {
-        Authorization: 'Bearer test-api-key',
-        'X-Tenant-ID': 'my-tenant-123',
-      },
-    }, mockEnv)
-
-    expect(capturedTenantId).toBe('my-tenant-123')
-  })
-
-  it('passes through when API key is valid', async () => {
-    const res = await app.request('/test', {
-      method: 'GET',
-      headers: {
-        Authorization: 'Bearer test-api-key',
-      },
-    }, mockEnv)
+      env,
+    )
 
     expect(res.status).toBe(200)
-    const json = await res.json()
-    expect(json).toEqual({ ok: true })
+    expect(await res.json()).toEqual({ ok: true, tenant_id: 'tenant-123' })
+    expect(env.DB.prepare).toHaveBeenCalledTimes(2)
   })
 })

@@ -27,7 +27,9 @@ export type { InvestigationRow, CampaignRow } from './db/investigations.js'
 
 export {
   queryDeployments,
+  getDeploymentById,
   queryClusters,
+  getClusterById,
   queryDestinations,
   updateDeploymentMetadata,
   upsertClusterInventory,
@@ -52,6 +54,12 @@ export {
   insertCloudDecoy,
 } from './db/cloud.js'
 export type { CloudConnectorRow, CloudDecoyRow } from './db/cloud.js'
+
+export {
+  getTenantApiKeyByHash,
+  touchTenantApiKey,
+} from './db/auth.js'
+export type { TenantApiKeyRow } from './db/auth.js'
 
 export {
   insertResponseAction,

@@ -1,23 +1,14 @@
 import type { Context, Next } from 'hono'
-import type { Env } from '../config.js'
+import type { AppEnv } from '../config.js'
+import { getTenantApiKeyByHash, touchTenantApiKey } from '../clients/db.js'
 
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
+async function sha256Hex(input: string): Promise<string> {
   const encoder = new TextEncoder()
-  const ab = encoder.encode(a)
-  const bb = encoder.encode(b)
-  let mismatch = 0
-  for (let i = 0; i < ab.length; i++) {
-    mismatch |= ab[i] ^ bb[i]
-  }
-  return mismatch === 0
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(input))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-export async function apiAuth(c: Context<{ Bindings: Env }>, next: Next) {
-  if (!c.env.API_KEY) {
-    return c.json({ error: 'Server misconfigured: API_KEY not set' }, 500)
-  }
-
+export async function apiAuth(c: Context<AppEnv>, next: Next) {
   const authHeader = c.req.header('Authorization')
   if (!authHeader) {
     return c.json({ error: 'Missing Authorization header' }, 401)
@@ -29,15 +20,19 @@ export async function apiAuth(c: Context<{ Bindings: Env }>, next: Next) {
   }
 
   const token = parts[1]
-  if (!token || !constantTimeEqual(token, c.env.API_KEY)) {
+  if (!token) {
     return c.json({ error: 'Invalid API key' }, 401)
   }
 
-  // Store optional tenant context for downstream authorization checks
-  const tenantHeader = c.req.header('X-Tenant-ID')
-  if (tenantHeader) {
-    c.set('tenantId', tenantHeader)
+  const keyHash = await sha256Hex(token)
+  const apiKeyRecord = await getTenantApiKeyByHash(c.env.DB, keyHash)
+  if (!apiKeyRecord) {
+    return c.json({ error: 'Invalid API key' }, 401)
   }
 
+  await touchTenantApiKey(c.env.DB, keyHash)
+
+  c.set('authenticatedTenantId', apiKeyRecord.tenant_id)
+  c.set('tenantId', apiKeyRecord.tenant_id)
   await next()
 }

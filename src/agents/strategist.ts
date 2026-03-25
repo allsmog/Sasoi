@@ -12,6 +12,7 @@ import { createGenerateBreadcrumbsTool } from '../tools/breadcrumbs.js'
 import { createDeployHoneytokenTool, createQueryHoneytokensTool } from '../tools/honeytokens.js'
 import { createDeployCloudDecoyTool } from '../tools/cloud-deception.js'
 import { createDeployDecoyServiceAccountTool } from '../tools/identity-deception.js'
+import { withMutationGuard } from '../tools/mutation.js'
 import { SafetyGuard } from '../safety/guard.js'
 import { sanitizeForPrompt } from '../safety/sanitize.js'
 import { createAgentSession, completeAgentSession, getTenantAgentConfig } from '../clients/db.js'
@@ -96,6 +97,7 @@ export async function runStrategist(
 
   const guard = new SafetyGuard({ sessionId, agentType: 'strategist', tenantId: params.tenantId, env })
   const tenantConfig = await getTenantAgentConfig(env.DB, env, params.tenantId)
+  const mutationCtx = { env, tenantId: params.tenantId, sessionId, agentType: 'strategist' }
 
   const agent = new Agent({
     initialState: {
@@ -113,10 +115,16 @@ export async function runStrategist(
         createGenerateBreadcrumbsTool(env),
         createQueryHoneytokensTool(env),
         ...(tenantConfig.autonomy_level >= 2 ? [
-          createExecuteDeploymentTool(env),
-          createDeployHoneytokenTool(env),
-          createDeployCloudDecoyTool(env),
-          createDeployDecoyServiceAccountTool(env),
+          withMutationGuard(createExecuteDeploymentTool(env), mutationCtx),
+          withMutationGuard(createDeployHoneytokenTool(env), mutationCtx, {
+            buildReasoning: (toolParams) => toolParams.placement_reasoning ?? `Deploy ${toolParams.token_type} honeytoken`,
+          }),
+          withMutationGuard(createDeployCloudDecoyTool(env), mutationCtx, {
+            buildReasoning: (toolParams) => `Deploy ${toolParams.decoy_type} cloud decoy`,
+          }),
+          withMutationGuard(createDeployDecoyServiceAccountTool(env), mutationCtx, {
+            buildReasoning: (toolParams) => toolParams.placement_reasoning ?? `Deploy decoy service account in ${toolParams.namespace}`,
+          }),
         ] : []),
       ],
       messages: [],

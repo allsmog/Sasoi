@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Env } from '../config.js'
+import type { AppEnv } from '../config.js'
 import { logger } from '../config.js'
 import { runEnricher } from '../agents/enricher.js'
 import { runInvestigator } from '../agents/investigator.js'
@@ -12,7 +12,7 @@ import { webhookAuth } from '../middleware/webhook-auth.js'
 // Webhook endpoints — called by HOP services or external systems
 // Replaces Supabase Realtime subscriptions
 
-export const webhookRoutes = new Hono<{ Bindings: Env; Variables: { rawBody: string } }>()
+export const webhookRoutes = new Hono<AppEnv>()
 
 // All webhook routes require HMAC signature verification
 webhookRoutes.use('/webhooks/*', webhookAuth)

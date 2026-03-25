@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
-import type { Env } from './config.js'
+import type { AppEnv } from './config.js'
 import { httpRoutes } from './triggers/http.js'
 import { webhookRoutes } from './triggers/webhook.js'
 import { handleScheduled } from './triggers/cron.js'
 
-const app = new Hono<{ Bindings: Env }>()
+const app = new Hono<AppEnv>()
 
 // Health check
 app.get('/healthz', (c) => {

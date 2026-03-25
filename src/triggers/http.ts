@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
-import type { Env } from '../config.js'
+import type { Context } from 'hono'
+import type { AppEnv } from '../config.js'
 import { logger } from '../config.js'
 import { runEnricher } from '../agents/enricher.js'
 import { runInvestigator } from '../agents/investigator.js'
@@ -7,78 +8,138 @@ import { runStrategist } from '../agents/strategist.js'
 import { runResponder } from '../agents/responder.js'
 import { getTenantAgentConfig, computeTenantMetrics, insertCloudConnector, queryCloudConnectors } from '../clients/db.js'
 import { checkRateLimit } from '../safety/guard.js'
-import * as orchestrator from '../clients/orchestrator.js'
 import { apiAuth } from '../middleware/api-auth.js'
+import { getProposalActionDefinition, ProposalActionError } from '../proposals/actions.js'
 
-export const httpRoutes = new Hono<{ Bindings: Env }>()
+export const httpRoutes = new Hono<AppEnv>()
 
 // All HTTP API routes require Bearer token authentication
 httpRoutes.use('/*', apiAuth)
 
+function getAuthenticatedTenantId(c: Context<AppEnv>): string {
+  return c.get('authenticatedTenantId')
+}
+
+function resolveTenantAccess(
+  c: Context<AppEnv>,
+  suppliedTenantId?: string,
+  label = 'tenant_id',
+): { tenantId: string } | { response: Response } {
+  const authenticatedTenantId = getAuthenticatedTenantId(c)
+  if (suppliedTenantId && suppliedTenantId !== authenticatedTenantId) {
+    return {
+      response: c.json({ error: `Tenant mismatch: ${label} must match authenticated tenant` }, 403),
+    }
+  }
+  return { tenantId: authenticatedTenantId }
+}
+
+function appendExecutionError(note: string | undefined, errorMessage: string): string {
+  return note ? `${note}\n\nExecution error: ${errorMessage}` : `Execution error: ${errorMessage}`
+}
+
 // --- Manual agent triggers ---
 
 httpRoutes.post('/agents/enricher/run', async (c) => {
-  const { tenant_id, event_id, event_data } = await c.req.json()
-  if (!tenant_id || !event_id || !event_data) return c.json({ error: 'tenant_id, event_id, and event_data required' }, 400)
-  if (!checkRateLimit(tenant_id, 'enricher', 100)) return c.json({ error: 'Rate limited' }, 429)
+  const body = await c.req.json<Record<string, unknown>>()
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  if (!body.event_id || !body.event_data) return c.json({ error: 'event_id and event_data required' }, 400)
+
+  const tenantId = tenantResolution.tenantId
+  const eventId = body.event_id as string
+  const eventData = body.event_data as {
+    src_ip: string
+    signal: string
+    severity: string
+    hp_type?: string
+    ua?: string
+    deployment_id?: string
+    enrichment?: Record<string, unknown>
+  }
+
+  if (!checkRateLimit(tenantId, 'enricher', 100)) return c.json({ error: 'Rate limited' }, 429)
 
   c.executionCtx.waitUntil(
-    runEnricher(c.env, { tenantId: tenant_id, eventId: event_id, eventData: event_data })
-      .catch((err) => logger.error({ err, event_id }, 'Manual enricher failed')),
+    runEnricher(c.env, { tenantId, eventId, eventData })
+      .catch((err) => logger.error({ err, event_id: eventId }, 'Manual enricher failed')),
   )
-  return c.json({ status: 'started', agent: 'enricher', event_id })
+  return c.json({ status: 'started', agent: 'enricher', event_id: eventId })
 })
 
 httpRoutes.post('/agents/investigator/run', async (c) => {
-  const { tenant_id, event_id, reason, src_ip } = await c.req.json()
-  if (!tenant_id) return c.json({ error: 'tenant_id required' }, 400)
-  if (!checkRateLimit(tenant_id, 'investigator', 20)) return c.json({ error: 'Rate limited' }, 429)
+  const body = await c.req.json<Record<string, unknown>>()
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
+
+  if (!checkRateLimit(tenantId, 'investigator', 20)) return c.json({ error: 'Rate limited' }, 429)
 
   c.executionCtx.waitUntil(
-    runInvestigator(c.env, { tenantId: tenant_id, trigger: 'http', context: { eventId: event_id, reason, srcIp: src_ip } })
-      .catch((err) => logger.error({ err, tenant_id }, 'Manual investigator failed')),
+    runInvestigator(c.env, {
+      tenantId,
+      trigger: 'http',
+      context: {
+        eventId: typeof body.event_id === 'string' ? body.event_id : undefined,
+        reason: typeof body.reason === 'string' ? body.reason : undefined,
+        srcIp: typeof body.src_ip === 'string' ? body.src_ip : undefined,
+      },
+    }).catch((err) => logger.error({ err, tenant_id: tenantId }, 'Manual investigator failed')),
   )
-  return c.json({ status: 'started', agent: 'investigator', tenant_id })
+  return c.json({ status: 'started', agent: 'investigator', tenant_id: tenantId })
 })
 
 httpRoutes.post('/agents/strategist/run', async (c) => {
-  const { tenant_id, cluster_id, reason } = await c.req.json()
-  if (!tenant_id) return c.json({ error: 'tenant_id required' }, 400)
-  if (!checkRateLimit(tenant_id, 'strategist', 5)) return c.json({ error: 'Rate limited' }, 429)
+  const body = await c.req.json<Record<string, unknown>>()
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
+
+  if (!checkRateLimit(tenantId, 'strategist', 5)) return c.json({ error: 'Rate limited' }, 429)
 
   c.executionCtx.waitUntil(
-    runStrategist(c.env, { tenantId: tenant_id, trigger: 'http', context: { clusterId: cluster_id, reason } })
-      .catch((err) => logger.error({ err, tenant_id }, 'Manual strategist failed')),
+    runStrategist(c.env, {
+      tenantId,
+      trigger: 'http',
+      context: {
+        clusterId: typeof body.cluster_id === 'string' ? body.cluster_id : undefined,
+        reason: typeof body.reason === 'string' ? body.reason : undefined,
+      },
+    }).catch((err) => logger.error({ err, tenant_id: tenantId }, 'Manual strategist failed')),
   )
-  return c.json({ status: 'started', agent: 'strategist', tenant_id })
+  return c.json({ status: 'started', agent: 'strategist', tenant_id: tenantId })
 })
 
 httpRoutes.post('/agents/responder/run', async (c) => {
-  const body = await c.req.json()
-  if (!body.tenant_id) return c.json({ error: 'tenant_id required' }, 400)
-  if (!checkRateLimit(body.tenant_id, 'responder', 10)) return c.json({ error: 'Rate limited' }, 429)
+  const body = await c.req.json<Record<string, unknown>>()
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
+
+  if (!checkRateLimit(tenantId, 'responder', 10)) return c.json({ error: 'Rate limited' }, 429)
 
   c.executionCtx.waitUntil(
     runResponder(c.env, {
-      tenantId: body.tenant_id,
+      tenantId,
       trigger: 'http',
       context: {
-        campaignId: body.campaign_id,
-        campaignName: body.campaign_name,
-        attackerIps: body.attacker_ips,
-        affectedDeployments: body.affected_deployments,
-        reason: body.reason,
+        campaignId: typeof body.campaign_id === 'string' ? body.campaign_id : undefined,
+        campaignName: typeof body.campaign_name === 'string' ? body.campaign_name : undefined,
+        attackerIps: Array.isArray(body.attacker_ips) ? body.attacker_ips as string[] : undefined,
+        affectedDeployments: Array.isArray(body.affected_deployments) ? body.affected_deployments as string[] : undefined,
+        reason: typeof body.reason === 'string' ? body.reason : undefined,
       },
     }).catch((err) => logger.error({ err }, 'Manual responder failed')),
   )
-  return c.json({ status: 'started', agent: 'responder', tenant_id: body.tenant_id })
+  return c.json({ status: 'started', agent: 'responder', tenant_id: tenantId })
 })
 
 // --- Proposals ---
 
 httpRoutes.get('/proposals', async (c) => {
-  const tenantId = c.req.query('tenant_id')
-  if (!tenantId) return c.json({ error: 'tenant_id query param required' }, 400)
+  const tenantResolution = resolveTenantAccess(c, c.req.query('tenant_id') ?? undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
 
   const { results } = await c.env.DB.prepare(
     'SELECT * FROM agent_proposals WHERE tenant_id = ? AND status = ? ORDER BY created_at DESC',
@@ -89,9 +150,12 @@ httpRoutes.get('/proposals', async (c) => {
 
 httpRoutes.post('/proposals/:proposalId/approve', async (c) => {
   const { proposalId } = c.req.param()
-  const { reviewed_by, note, tenant_id } = await c.req.json()
-
-  if (!tenant_id) return c.json({ error: 'tenant_id required in request body' }, 400)
+  const body = await c.req.json<Record<string, unknown>>()
+  const reviewedBy = typeof body.reviewed_by === 'string' ? body.reviewed_by : undefined
+  const note = typeof body.note === 'string' ? body.note : undefined
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
 
   const proposal = await c.env.DB.prepare(
     'SELECT * FROM agent_proposals WHERE proposal_id = ? AND status = ?',
@@ -100,55 +164,76 @@ httpRoutes.post('/proposals/:proposalId/approve', async (c) => {
   if (!proposal) return c.json({ error: 'Proposal not found or already processed' }, 404)
 
   // Cross-tenant authorization: caller's tenant must match proposal's tenant
-  if (proposal.tenant_id !== tenant_id) {
+  if (proposal.tenant_id !== tenantId) {
     return c.json({ error: 'Tenant mismatch: not authorized to approve this proposal' }, 403)
   }
   if (new Date(proposal.expires_at as string) < new Date()) {
-    await c.env.DB.prepare('UPDATE agent_proposals SET status = ? WHERE proposal_id = ?').bind('expired', proposalId).run()
+    await c.env.DB.prepare('UPDATE agent_proposals SET status = ? WHERE proposal_id = ? AND status = ?').bind('expired', proposalId, 'pending').run()
     return c.json({ error: 'Proposal has expired' }, 410)
   }
 
-  // Parse action_payload BEFORE marking approved to avoid stuck state on malformed data
   const actionType = proposal.action_type as string
-  let actionPayload: Record<string, unknown>
+  const actionDefinition = getProposalActionDefinition(actionType)
+  if (!actionDefinition) {
+    return c.json({ error: `Unsupported proposal action_type: ${actionType}` }, 422)
+  }
+
+  let rawPayload: unknown
   try {
-    actionPayload = JSON.parse(proposal.action_payload as string)
+    rawPayload = JSON.parse(proposal.action_payload as string)
   } catch {
     return c.json({ error: 'Proposal has malformed action_payload' }, 422)
   }
 
-  // Atomic status transition — prevents double-approval race condition
+  const parsedPayload = actionDefinition.schema.safeParse(rawPayload)
+  if (!parsedPayload.success) {
+    return c.json({
+      error: 'Proposal payload failed validation',
+      details: parsedPayload.error.flatten(),
+    }, 422)
+  }
+
+  const reviewedAt = new Date().toISOString()
   const updateResult = await c.env.DB.prepare(
     'UPDATE agent_proposals SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE proposal_id = ? AND status = ?',
-  ).bind('approved', reviewed_by ?? null, new Date().toISOString(), note ?? null, proposalId, 'pending').run()
+  ).bind('approved', reviewedBy ?? null, reviewedAt, note ?? null, proposalId, 'pending').run()
 
   if (!updateResult.meta.changes) {
     return c.json({ error: 'Proposal was already processed by another request' }, 409)
   }
 
-  // Execute approved action
   try {
-    if (actionType === 'deploy_honeypot' || actionType === 'deploy_canary') {
-      await orchestrator.createDeployment(c.env, actionPayload)
-      await c.env.DB.prepare('UPDATE agent_proposals SET status = ? WHERE proposal_id = ?').bind('executed', proposalId).run()
-    }
-  } catch (err) {
-    logger.error({ err, proposalId }, 'Failed to execute approved proposal')
-  }
+    const result = await actionDefinition.execute({ env: c.env, tenantId }, parsedPayload.data)
+    await c.env.DB.prepare(
+      'UPDATE agent_proposals SET status = ? WHERE proposal_id = ?',
+    ).bind('executed', proposalId).run()
 
-  return c.json({ status: 'approved', proposal_id: proposalId })
+    return c.json({ status: 'executed', proposal_id: proposalId, result })
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err)
+    const httpStatus = (err instanceof ProposalActionError ? err.httpStatus : 502) as 403 | 404 | 502
+    await c.env.DB.prepare(
+      'UPDATE agent_proposals SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE proposal_id = ?',
+    ).bind('execution_failed', appendExecutionError(note, errorMessage), reviewedBy ?? null, reviewedAt, proposalId).run()
+
+    logger.error({ err, proposalId }, 'Failed to execute approved proposal')
+    return c.json({ status: 'execution_failed', proposal_id: proposalId, error: errorMessage }, httpStatus)
+  }
 })
 
 httpRoutes.post('/proposals/:proposalId/reject', async (c) => {
   const { proposalId } = c.req.param()
-  const { reviewed_by, note, tenant_id } = await c.req.json()
-
-  if (!tenant_id) return c.json({ error: 'tenant_id required in request body' }, 400)
+  const body = await c.req.json<Record<string, unknown>>()
+  const reviewedBy = typeof body.reviewed_by === 'string' ? body.reviewed_by : undefined
+  const note = typeof body.note === 'string' ? body.note : undefined
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
 
   // Tenant isolation: only allow rejection by the owning tenant
   await c.env.DB.prepare(
     'UPDATE agent_proposals SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE proposal_id = ? AND tenant_id = ? AND status = ?',
-  ).bind('rejected', reviewed_by ?? null, new Date().toISOString(), note ?? null, proposalId, tenant_id, 'pending').run()
+  ).bind('rejected', reviewedBy ?? null, new Date().toISOString(), note ?? null, proposalId, tenantId, 'pending').run()
 
   return c.json({ status: 'rejected', proposal_id: proposalId })
 })
@@ -156,8 +241,9 @@ httpRoutes.post('/proposals/:proposalId/reject', async (c) => {
 // --- Agent activity ---
 
 httpRoutes.get('/sessions', async (c) => {
-  const tenantId = c.req.query('tenant_id')
-  if (!tenantId) return c.json({ error: 'tenant_id query param required' }, 400)
+  const tenantResolution = resolveTenantAccess(c, c.req.query('tenant_id') ?? undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
   const parsedLimit = parseInt(c.req.query('limit') ?? '50', 10)
   const limit = Math.min(Number.isNaN(parsedLimit) ? 50 : parsedLimit, 1000)
 
@@ -171,15 +257,18 @@ httpRoutes.get('/sessions', async (c) => {
 // --- Tenant config ---
 
 httpRoutes.get('/config/:tenantId', async (c) => {
-  const config = await getTenantAgentConfig(c.env.DB, c.env, c.req.param('tenantId'))
+  const tenantResolution = resolveTenantAccess(c, c.req.param('tenantId'), 'tenantId')
+  if ('response' in tenantResolution) return tenantResolution.response
+  const config = await getTenantAgentConfig(c.env.DB, c.env, tenantResolution.tenantId)
   return c.json(config)
 })
 
 // --- Metrics ---
 
 httpRoutes.get('/metrics/:tenantId', async (c) => {
-  const tenantId = c.req.param('tenantId')
-  if (!tenantId) return c.json({ error: 'tenant_id required' }, 400)
+  const tenantResolution = resolveTenantAccess(c, c.req.param('tenantId'), 'tenantId')
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
 
   const since = c.req.query('since')
   const until = c.req.query('until')
@@ -194,33 +283,42 @@ httpRoutes.get('/metrics/:tenantId', async (c) => {
 // --- Cloud connectors ---
 
 httpRoutes.post('/cloud-connectors', async (c) => {
-  const body = await c.req.json()
-  if (!body.tenant_id || !body.provider || !body.account_ref) {
-    return c.json({ error: 'tenant_id, provider, and account_ref required' }, 400)
+  const body = await c.req.json<Record<string, unknown>>()
+  const tenantResolution = resolveTenantAccess(c, typeof body.tenant_id === 'string' ? body.tenant_id : undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  if (!body.provider || !body.account_ref) {
+    return c.json({ error: 'provider and account_ref required' }, 400)
   }
 
   const connectorId = await insertCloudConnector(c.env.DB, {
-    tenant_id: body.tenant_id,
-    provider: body.provider,
-    account_ref: body.account_ref,
-    enabled_regions: body.enabled_regions,
-    allowed_decoy_types: body.allowed_decoy_types,
+    tenant_id: tenantResolution.tenantId,
+    provider: body.provider as string,
+    account_ref: body.account_ref as string,
+    enabled_regions: Array.isArray(body.enabled_regions) ? body.enabled_regions as string[] : undefined,
+    allowed_decoy_types: Array.isArray(body.allowed_decoy_types) ? body.allowed_decoy_types as string[] : undefined,
   })
 
   return c.json({ status: 'created', connector_id: connectorId }, 201)
 })
 
 httpRoutes.get('/cloud-connectors', async (c) => {
-  const tenantId = c.req.query('tenant_id')
-  if (!tenantId) return c.json({ error: 'tenant_id query param required' }, 400)
+  const tenantResolution = resolveTenantAccess(c, c.req.query('tenant_id') ?? undefined)
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
 
   const { results } = await queryCloudConnectors(c.env.DB, tenantId)
   return c.json(results)
 })
 
 httpRoutes.put('/config/:tenantId', async (c) => {
-  const tenantId = c.req.param('tenantId')
-  const body = await c.req.json()
+  const tenantResolution = resolveTenantAccess(c, c.req.param('tenantId'), 'tenantId')
+  if ('response' in tenantResolution) return tenantResolution.response
+  const tenantId = tenantResolution.tenantId
+  const body = await c.req.json<Record<string, unknown>>()
+
+  if (typeof body.tenant_id === 'string' && body.tenant_id !== tenantId) {
+    return c.json({ error: 'Tenant mismatch: tenant_id must match authenticated tenant' }, 403)
+  }
 
   // Validate autonomy_level if provided
   if (body.autonomy_level !== undefined) {

@@ -7,7 +7,13 @@ vi.mock('../../src/clients/orchestrator.js', () => ({
   createDeployment: vi.fn().mockResolvedValue({ deployment_id: 'dep-1', status: 'deploying' }),
 }))
 vi.mock('../../src/clients/blueprint.js', () => ({
-  generatePersona: vi.fn().mockResolvedValue({ persona: { service_type: 'ssh', port: 22 } }),
+  generatePersona: vi.fn().mockResolvedValue({
+    persona: { service: 'ssh', egress: 'deny', sandbox: true, user: 'honeypot' },
+    buildPlan: { blueprint_id: 'bp-canary', config: { ports: [22] } },
+  }),
+}))
+vi.mock('../../src/safety/schemas.js', () => ({
+  validatePersonaSafety: vi.fn().mockReturnValue({ valid: true, violations: [] }),
 }))
 
 const mockEnv = {
@@ -44,7 +50,7 @@ describe('createProposeDeploymentTool', () => {
       mockEnv.DB,
       mockEnv,
       expect.objectContaining({
-        action_type: 'deploy_honeypot',
+        action_type: 'execute_deployment',
       }),
     )
   })
@@ -104,49 +110,42 @@ describe('createDeployCanaryTool', () => {
     vi.clearAllMocks()
   })
 
-  it('generates persona before creating proposal', async () => {
+  it('generates persona before executing canary deployment', async () => {
     const blueprintClient = await import('../../src/clients/blueprint.js')
-    const { createProposal } = await import('../../src/clients/db.js')
+    const orchestrator = await import('../../src/clients/orchestrator.js')
 
     const { createDeployCanaryTool } = await import('../../src/tools/deployment.js')
     const tool = createDeployCanaryTool(mockEnv)
-    await tool.execute('call-4', {
+    const result = await tool.execute('call-4', {
       tenant_id: 'tenant-1',
       service_type: 'ssh',
       target_ips: ['10.0.0.1'],
       reasoning: 'Track attacker lateral movement',
     })
 
-    expect(blueprintClient.generatePersona).toHaveBeenCalledBefore(vi.mocked(createProposal))
-    expect(createProposal).toHaveBeenCalledWith(
-      mockEnv.DB,
+    expect(blueprintClient.generatePersona).toHaveBeenCalledBefore(vi.mocked(orchestrator.createDeployment))
+    expect(orchestrator.createDeployment).toHaveBeenCalledWith(
       mockEnv,
-      expect.objectContaining({
-        action_type: 'deploy_canary',
-      }),
+      { blueprint_id: 'bp-canary', config: { ports: [22] } },
     )
+    expect(result.details).toEqual(expect.objectContaining({
+      deployment_request: { blueprint_id: 'bp-canary', config: { ports: [22] } },
+    }))
   })
 
-  it('includes target IPs in proposal payload', async () => {
-    const { createProposal } = await import('../../src/clients/db.js')
-
+  it('returns target IPs in deployment details', async () => {
     const { createDeployCanaryTool } = await import('../../src/tools/deployment.js')
     const tool = createDeployCanaryTool(mockEnv)
-    await tool.execute('call-5', {
+    const result = await tool.execute('call-5', {
       tenant_id: 'tenant-1',
       service_type: 'redis',
       target_ips: ['10.0.0.1', '10.0.0.2'],
       reasoning: 'Known attacker IPs',
     })
 
-    expect(createProposal).toHaveBeenCalledWith(
-      mockEnv.DB,
-      mockEnv,
-      expect.objectContaining({
-        action_payload: expect.objectContaining({
-          target_ips: ['10.0.0.1', '10.0.0.2'],
-        }),
-      }),
-    )
+    expect(result.details).toEqual(expect.objectContaining({
+      target_ips: ['10.0.0.1', '10.0.0.2'],
+      service_type: 'redis',
+    }))
   })
 })

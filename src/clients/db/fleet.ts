@@ -32,6 +32,13 @@ export async function queryDeployments(db: D1Database, tenantId: string, status?
   return db.prepare('SELECT * FROM deployments WHERE tenant_id = ? LIMIT 500').bind(tenantId).all()
 }
 
+export async function getDeploymentById(db: D1Database, deploymentId: string) {
+  return db
+    .prepare('SELECT * FROM deployments WHERE deployment_id = ?')
+    .bind(deploymentId)
+    .first<DeploymentRow>()
+}
+
 export async function queryClusters(db: D1Database, tenantId: string, status?: string) {
   if (status) {
     return db
@@ -40,6 +47,13 @@ export async function queryClusters(db: D1Database, tenantId: string, status?: s
       .all()
   }
   return db.prepare('SELECT * FROM clusters WHERE tenant_id = ? LIMIT 500').bind(tenantId).all()
+}
+
+export async function getClusterById(db: D1Database, clusterId: string) {
+  return db
+    .prepare('SELECT * FROM clusters WHERE cluster_id = ?')
+    .bind(clusterId)
+    .first<{ cluster_id: string; tenant_id: string; status: string | null }>()
 }
 
 export async function queryDestinations(db: D1Database, tenantId: string) {

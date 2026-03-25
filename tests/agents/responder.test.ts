@@ -44,6 +44,12 @@ vi.mock('../../src/tools/persona.js', () => ({
 }))
 vi.mock('../../src/tools/deployment.js', () => ({
   createDeployCanaryTool: vi.fn().mockReturnValue({ name: 'deploy_canary' }),
+  prepareCanaryDeploymentPayload: vi.fn().mockResolvedValue({
+    service_type: 'ssh',
+    target_ips: ['1.2.3.4'],
+    persona: {},
+    deployment_request: { blueprint_id: 'bp-1', config: {} },
+  }),
 }))
 vi.mock('../../src/tools/notification.js', () => ({
   createIncreaseLoggingDepthTool: vi.fn().mockReturnValue({ name: 'increase_logging_depth' }),

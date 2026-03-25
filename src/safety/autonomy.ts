@@ -1,0 +1,33 @@
+export const AUTONOMY_REQUIREMENTS: Record<string, number> = {
+  execute_deployment: 2,
+  deploy_canary: 2,
+  rotate_persona: 1,
+  generate_persona_variation: 1,
+  increase_logging_depth: 1,
+  trigger_notification: 0,
+  propose_deployment: 0,
+  create_investigation: 0,
+  flag_campaign: 0,
+  generate_report: 0,
+  generate_decoy_files: 0,
+  generate_breadcrumbs: 0,
+  deploy_honeytoken: 2,
+  query_honeytokens: 0,
+  block_ip: 2,
+  redirect_attacker: 2,
+  deploy_cloud_decoy: 2,
+  deploy_decoy_sa: 2,
+}
+
+export const MUTATION_TOOL_NAMES = new Set([
+  'execute_deployment',
+  'deploy_canary',
+  'rotate_persona',
+  'generate_persona_variation',
+  'increase_logging_depth',
+  'deploy_honeytoken',
+  'block_ip',
+  'redirect_attacker',
+  'deploy_cloud_decoy',
+  'deploy_decoy_sa',
+])

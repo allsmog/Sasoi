@@ -1,8 +1,8 @@
 import type { Context, Next } from 'hono'
-import type { Env } from '../config.js'
+import type { AppEnv } from '../config.js'
 import { verifyHmac } from '../clients/hmac.js'
 
-export async function webhookAuth(c: Context<{ Bindings: Env }>, next: Next) {
+export async function webhookAuth(c: Context<AppEnv>, next: Next) {
   const signature = c.req.header('X-HOP-Signature')
   if (!signature) {
     return c.json({ error: 'Missing X-HOP-Signature header' }, 401)

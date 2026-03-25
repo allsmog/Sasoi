@@ -4,6 +4,92 @@ import type { Env } from '../config.js'
 import * as orchestrator from '../clients/orchestrator.js'
 import * as blueprintClient from '../clients/blueprint.js'
 import { createProposal } from '../clients/db.js'
+import { validatePersonaSafety } from '../safety/schemas.js'
+
+export interface DeploymentRequest {
+  blueprint_id: string
+  config: Record<string, unknown>
+  deployment_location?: string
+  connector_id?: string
+  cluster_id?: string
+}
+
+export interface CanaryDeploymentPayload {
+  service_type: string
+  target_ips: string[]
+  persona: Record<string, unknown>
+  deployment_request: DeploymentRequest
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function extractDeploymentRequest(buildPlan: Record<string, unknown>): DeploymentRequest | null {
+  const candidate = isRecord(buildPlan.deployment_request) ? buildPlan.deployment_request : buildPlan
+  if (typeof candidate.blueprint_id !== 'string' || !isRecord(candidate.config)) {
+    return null
+  }
+
+  return {
+    blueprint_id: candidate.blueprint_id,
+    config: candidate.config,
+    deployment_location: typeof candidate.deployment_location === 'string' ? candidate.deployment_location : undefined,
+    connector_id: typeof candidate.connector_id === 'string' ? candidate.connector_id : undefined,
+    cluster_id: typeof candidate.cluster_id === 'string' ? candidate.cluster_id : undefined,
+  }
+}
+
+export async function prepareCanaryDeploymentPayload(
+  env: Env,
+  params: { service_type: string; target_ips: string[] },
+): Promise<CanaryDeploymentPayload> {
+  const personaResult = (await blueprintClient.generatePersona(env, {
+    service_type: params.service_type,
+    complexity: 'high',
+    target_environment: `Canary for tracking IPs: ${params.target_ips.join(', ')}`,
+  })) as {
+    persona: Record<string, unknown>
+    buildPlan?: Record<string, unknown>
+  }
+
+  const safetyCheck = validatePersonaSafety(personaResult.persona)
+  if (!safetyCheck.valid) {
+    throw new Error(`Persona generation returned unsafe persona: ${safetyCheck.violations.join(', ')}`)
+  }
+
+  if (!isRecord(personaResult.buildPlan)) {
+    throw new Error('Canary persona buildPlan missing from blueprint response')
+  }
+
+  const deploymentRequest = extractDeploymentRequest(personaResult.buildPlan)
+  if (!deploymentRequest) {
+    throw new Error('Canary buildPlan did not include an executable deployment request')
+  }
+
+  return {
+    service_type: params.service_type,
+    target_ips: params.target_ips,
+    persona: personaResult.persona,
+    deployment_request: deploymentRequest,
+  }
+}
+
+export async function executeCanaryDeploymentRequest(
+  env: Env,
+  tenantId: string,
+  payload: CanaryDeploymentPayload,
+) {
+  const result = await orchestrator.createDeployment(env, payload.deployment_request)
+  return {
+    tenant_id: tenantId,
+    service_type: payload.service_type,
+    target_ips: payload.target_ips,
+    persona: payload.persona,
+    deployment_request: payload.deployment_request,
+    deployment_result: result,
+  }
+}
 
 export function createProposeDeploymentTool(env: Env): AgentTool<typeof ProposeDeploymentParams> {
   return {
@@ -17,7 +103,7 @@ export function createProposeDeploymentTool(env: Env): AgentTool<typeof ProposeD
         session_id: null,
         agent_type: 'strategist',
         tenant_id: params.tenant_id,
-        action_type: 'deploy_honeypot',
+        action_type: 'execute_deployment',
         action_payload: {
           blueprint_id: params.blueprint_id,
           cluster_id: params.cluster_id,
@@ -63,30 +149,25 @@ export function createDeployCanaryTool(env: Env): AgentTool<typeof DeployCanaryP
     name: 'deploy_canary',
     label: 'Deploy Canary',
     description:
-      'Deploy a canary honeypot to attract known attacker IPs. Generates a fresh persona tailored to the attack pattern.',
+      'Deploy a canary honeypot to attract known attacker IPs. Generates a fresh persona and uses the blueprint build plan to launch the deployment.',
     parameters: DeployCanaryParams,
     execute: async (_toolCallId, params) => {
-      const personaResult = (await blueprintClient.generatePersona(env, {
+      const payload = await prepareCanaryDeploymentPayload(env, {
         service_type: params.service_type,
-        complexity: 'high',
-        target_environment: `Canary for tracking IPs: ${params.target_ips.join(', ')}`,
-      })) as { persona: Record<string, unknown> }
-
-      const proposalId = await createProposal(env.DB, env, {
-        session_id: null,
-        agent_type: 'responder',
-        tenant_id: params.tenant_id,
-        action_type: 'deploy_canary',
-        action_payload: {
-          service_type: params.service_type,
-          target_ips: params.target_ips,
-          persona: personaResult.persona,
-        },
-        reasoning: params.reasoning,
+        target_ips: params.target_ips,
       })
+      const result = await executeCanaryDeploymentRequest(env, params.tenant_id, payload)
       return {
-        content: [{ type: 'text' as const, text: `Canary deployment proposed (ID: ${proposalId}). Service: ${params.service_type}, tracking ${params.target_ips.length} IPs.` }],
-        details: { proposal_id: proposalId },
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            service_type: params.service_type,
+            target_ips: params.target_ips,
+            deployment_request: payload.deployment_request,
+            deployment_result: result.deployment_result,
+          }, null, 2),
+        }],
+        details: result,
       }
     },
   }
