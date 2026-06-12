@@ -4,6 +4,18 @@
   "description": "Autonomous AI agents for the Honeypot Orchestration Platform — runs on Cloudflare Workers",
   "author": "Shayaun Nejad",
   "license": "MIT",
+  "keywords": [
+    "honeypot",
+    "deception",
+    "threat-intelligence",
+    "ai-agents",
+    "cloudflare-workers",
+    "security-automation",
+    "honeytokens",
+    "mitre-attack",
+    "llm",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/allsmog/Sasoi.git"
